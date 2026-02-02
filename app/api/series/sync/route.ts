@@ -3,32 +3,38 @@ import TCGDex from '@tcgdex/sdk';
 import { supabaseAdmin } from '@/lib/supabase/supabaseAdmin';
 
 const tcgdex = new TCGDex('en');
+const ENABLED_SERIES = ['sv', 'me'];
 
 export async function GET() {
   try {
-    // 1. traaigo lo que tiene la DB
-    const { data: localSeries } = await supabaseAdmin
+    const { data: localSeries, error: fetchError } = await supabaseAdmin
       .from('series')
-      .select('*')
-      .order('name', { ascending: true });
+      .select('id_api_series');
 
-    // si hay datos en la DB, retornamos eso
-    if (localSeries && localSeries.length > 0) {
-      console.log(">>> Series servidas desde DB local.");
-      return NextResponse.json({ success: true, source: 'database', data: localSeries });
+    if (fetchError) throw fetchError;
+
+    const existingIds = new Set(localSeries?.map((s) => s.id_api_series));
+
+    const allSeries = await tcgdex.fetch('series');
+    if (!allSeries || allSeries.length === 0) throw new Error('No se pudo obtener series desde la API.');
+
+    const newSeries = allSeries.filter((serie) => !existingIds.has(serie.id));
+
+    if (newSeries.length === 0) {
+      console.log('no hay nuevas series para insertar.');
+      const { data: fullSeries } = await supabaseAdmin
+        .from('series')
+        .select('*')
+        .order('name', { ascending: true });
+
+      return NextResponse.json({ success: true, source: 'database', data: fullSeries });
     }
 
-    // 2. si la DB esta pelada, llamamos a la API
-    console.log(">>> DB vacía. Sincronizando series desde TCGDex...");
-    const allSeries = await tcgdex.fetch('series');
-
-    if (!allSeries) throw new Error("API Indisponible.");
-
-    const toInsert = allSeries.map((serie) => ({
+    const toInsert = newSeries.map((serie) => ({
       id_api_series: serie.id,
       name: serie.name,
-      enabled: false, 
-      image_logo: serie.logo ? `${serie.logo}.webp` : ''
+      enabled: ENABLED_SERIES.includes(serie.id),
+      image_logo: serie.logo ? `${serie.logo}.webp` : '',
     }));
 
     const { data: inserted, error: upsertError } = await supabaseAdmin
@@ -38,47 +44,17 @@ export async function GET() {
 
     if (upsertError) throw upsertError;
 
-    return NextResponse.json({ success: true, source: 'api', data: inserted });
+    console.log(`${inserted.length} nuevas series insertadas.`);
+    const { data: updatedSeries } = await supabaseAdmin
+      .from('series')
+      .select('*')
+      .order('name', { ascending: true });
+
+    return NextResponse.json({ success: true, source: 'api+db', data: updatedSeries });
+
   } catch (error: unknown) {
-    const message = error instanceof Error ? error.message : 'An unknown error occurred';
+    const message = error instanceof Error ? error.message : 'Error desconocido';
+    console.error('error al sincronizar series:', message);
     return NextResponse.json({ error: message }, { status: 500 });
   }
 }
-// import { NextResponse } from 'next/server';
-// import TCGDex from '@tcgdex/sdk';
-// import { supabaseAdmin } from '@/lib/supabase/supabaseAdmin';
-
-// const tcgdex = new TCGDex('en');
-
-// export async function GET() {
-//   try {
-//     const { data: localSeries } = await supabaseAdmin
-//       .from('series')
-//       .select('*');
-
-//     const allSeries = await tcgdex.fetch('series');
-
-//     if (!allSeries) {
-//       if (localSeries && localSeries.length > 0) return NextResponse.json({ success: true, data: localSeries, cached: true });
-//       throw new Error("API Indisponible y no hay datos locales.");
-//     }
-
-//     const toInsert = allSeries.map((serie) => ({
-//       id_api_series: serie.id,
-//       name: serie.name,
-//       image_logo: serie.logo ? `${serie.logo}.webp` : ''
-//     }));
-
-//     const { data: inserted, error: upsertError } = await supabaseAdmin
-//       .from('series')
-//       .upsert(toInsert, { onConflict: 'id_api_series' })
-//       .select();
-
-//     if (upsertError) throw upsertError;
-
-//     return NextResponse.json({ success: true, count: inserted?.length, data: inserted });
-//   } catch (error: unknown) {
-//     const message = error instanceof Error ? error.message : 'An unknown error occurred';
-//     return NextResponse.json({ error: message }, { status: 500 });
-//   }
-// }
